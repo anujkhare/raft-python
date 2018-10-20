@@ -7,7 +7,7 @@ import enum
 import grpc
 import time
 
-from raft.protos import raft_pb2_grpc
+from raft.protos import raft_pb2_grpc, raft_pb2
 
 _ONE_DAY_IN_SECONDS = 60 * 60 * 24
 
@@ -38,6 +38,7 @@ class FollowerNode(raft_pb2_grpc.NodeServicer):
         if not request.entries:
             print('heartbeat received!')
             self._record_heartbeat()
+        return raft_pb2.AppendEntryReply()
 
     async def start(self) -> None:
         while True:
@@ -54,47 +55,59 @@ class FollowerNode(raft_pb2_grpc.NodeServicer):
 
 
 class LeaderNode(FollowerNode):
-    def __init__(self, follower_ports: List[int], heartbeat_interval: int = 5) -> None:
+    def __init__(self, follower_ports: List[int], heartbeat_interval: int = 3) -> None:
         super().__init__(state=States.Leader.value)
         print('A Leader was set-up!')
         self.heartbeat_interval = heartbeat_interval
         self.follower_ports = follower_ports
 
     async def send_heartbeat(self) -> None:
-        pass
-        # while True:
-        # for ix in range(3):
-        #     await asyncio.sleep(self.heartbeat_interval)
-        #     for waiter in waiter_list:
-        #         waiter.receive_heartbeat()
+        while True:
+            await asyncio.sleep(self.heartbeat_interval)
+            for port in self.follower_ports:
+                with grpc.insecure_channel('localhost:{}'.format(port)) as channel:
+                    node_stub = raft_pb2_grpc.NodeStub(channel)
+                    _ = node_stub.AppendEntries(request=raft_pb2.AppendEntryRequest())
 
 
 def serve_follower(port_no: int):
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
+    waiter = FollowerNode(timeout_in_sec=10)
     raft_pb2_grpc.add_NodeServicer_to_server(
-        FollowerNode(), server
+        waiter, server
     )
     server.add_insecure_port('[::]:{}'.format(port_no))
     server.start()
 
     try:
-        while True:
-            time.sleep(_ONE_DAY_IN_SECONDS)
+
+        loop = asyncio.new_event_loop()
+        tasks = [
+            waiter.start(),
+        ]
+
+        # FIXME: I am not actually sure what having futures ThreadPool and asyncio loop together means, need to figure
+        loop.run_until_complete(asyncio.wait(tasks))  # FIXME: figure out the exception handling for this
     except KeyboardInterrupt:
         server.stop(0)
 
 
 def serve_leader(port_no, follower_ports):
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
+
+    leader = LeaderNode(follower_ports=follower_ports)
     raft_pb2_grpc.add_NodeServicer_to_server(
-        LeaderNode(follower_ports=follower_ports), server
+        leader, server
     )
     server.add_insecure_port('[::]:{}'.format(port_no))
     server.start()
 
     try:
-        while True:
-            time.sleep(_ONE_DAY_IN_SECONDS)
+        loop = asyncio.new_event_loop()
+        tasks = [
+            leader.send_heartbeat()
+        ]
+        loop.run_until_complete(asyncio.wait(tasks))  # FIXME: figure out the exception handling for this
     except KeyboardInterrupt:
         server.stop(0)
 
