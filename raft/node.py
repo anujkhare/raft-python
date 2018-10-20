@@ -1,10 +1,14 @@
 #   Primary Author: Anuj Khare <khareanuj18@gmail.com>
+import os
+os.environ['PYTHONASYNCIODEBUG'] = '1'
+
 from concurrent import futures
 from typing import List
 import argparse
 import asyncio
 import enum
 import grpc
+import logging
 import time
 
 from raft.protos import raft_pb2_grpc, raft_pb2
@@ -25,7 +29,7 @@ class FollowerNode(raft_pb2_grpc.NodeServicer):
         self.current_term = 0
         self.voted_for = None
         self.log = None
-        print('A Follower was set-up!')
+        logger.info('A Follower was set-up!')
 
         # For the internal time-outs
         self.timeout_in_sec = timeout_in_sec
@@ -36,7 +40,7 @@ class FollowerNode(raft_pb2_grpc.NodeServicer):
 
     def AppendEntries(self, request, context) -> None:
         if not request.entries:
-            print('heartbeat received!')
+            logger.info('heartbeat received!')
             self._record_heartbeat()
         return raft_pb2.AppendEntryReply()
 
@@ -45,19 +49,22 @@ class FollowerNode(raft_pb2_grpc.NodeServicer):
             await asyncio.sleep(self.check_interval_in_sec)
             current_time = time.monotonic()
             elapsed_in_sec = current_time - self.last_heard
-            print('checking', elapsed_in_sec)
+            logger.info('checking: {}'.format(elapsed_in_sec))
             if elapsed_in_sec >= self.timeout_in_sec:
-                print('I timed out!!')
+                logger.info('I timed out!!')
                 raise TimeoutError('timed out!')
 
     def _record_heartbeat(self) -> None:
         self.last_heard = time.monotonic()
 
+    def _commit_data(self) -> None:
+        pass
+
 
 class LeaderNode(FollowerNode):
     def __init__(self, follower_ports: List[int], heartbeat_interval: int = 3) -> None:
         super().__init__(state=States.Leader.value)
-        print('A Leader was set-up!')
+        logger.info('A Leader was set-up!')
         self.heartbeat_interval = heartbeat_interval
         self.follower_ports = follower_ports
 
@@ -101,6 +108,8 @@ def serve_leader(port_no, follower_ports):
     )
     server.add_insecure_port('[::]:{}'.format(port_no))
     server.start()
+    logger.info('Initializing leader on the port {} with the following follower ports: {}'.format(port_no,
+                                                                                                  follower_ports))
 
     try:
         loop = asyncio.new_event_loop()
@@ -112,20 +121,35 @@ def serve_leader(port_no, follower_ports):
         server.stop(0)
 
 
+def init_logging(level='DEBUG'):
+    logger_ = logging.getLogger(__name__)
+    logger_.setLevel(level=level)
+
+    filehandler = logging.FileHandler('node.log')
+    defaulthandler = logging.StreamHandler()
+    logger_.addHandler(filehandler)
+    logger_.addHandler(defaulthandler)
+
+    return logger_
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('-p', '--port', help='The port of the node', type=int, required=True)
     parser.add_argument('-s', '--state', help='The state of the node: leader/follower', type=str, default='follower')
     parser.add_argument('-f', '--follower-ports', help='The comma separated ports of the follower nodes', type=str)
 
+    logger = init_logging()
+
     args = parser.parse_args()
     if args.state == 'leader':
         if not args.follower_ports:
+            logger.error('Need to supply ports of the followers')
             raise ValueError
 
         follower_ports = args.follower_ports.split(',')
-        print(follower_ports)
-        serve_leader(port_no=args.port, follower_ports=follower_ports)
+        port = args.port
+        serve_leader(port_no=port, follower_ports=follower_ports)
 
     elif args.state == 'follower':
         serve_follower(port_no=args.port)
